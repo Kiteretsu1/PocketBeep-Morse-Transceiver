@@ -3,7 +3,7 @@
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Hardware](https://img.shields.io/badge/Hardware-Open_Source-orange)
 A compact, retro-styled Morse code communicator built around the Seeed Studio XIAO ESP32-C3. This project uses ESP-NOW to send authentic Morse timing pulses over the air, avoiding the "cheat" of sending raw text strings. It features a live text-to-Morse translator, an inbox for missed messages, customizable UI themes, and a few hidden arcade games.
-![Alt text]([Kiteretsu1/PocketBeep-Morse-Transreciver/Assets/IMG_20261117_125700.jpg](https://github.com/Kiteretsu1/PocketBeep-Morse-Transreciver/blob/main/Assets/IMG_20261117_125700.jpg))
+![Alt text](https://encrypted-tbn2.gstatic.com/licensed-image?q=tbn:ANd9GcQ1vV_f18rJFJ99gIKzMXgOuyzrtjlyyylfeoTsnxp3QrOCidc4GcLJrzHiaFJjPQibKp6dwWD3_eqeaJM)
 
 
 (https://github.com/Kiteretsu1/PocketBeep-Morse-Transreciver/blob/main/Assets/IMG_20261117_125700.jpg)
