@@ -5,11 +5,6 @@
 A compact, retro-styled Morse code communicator built around the Seeed Studio XIAO ESP32-C3. This project uses ESP-NOW to send authentic Morse timing pulses over the air, avoiding the "cheat" of sending raw text strings. It features a live text-to-Morse translator, an inbox for missed messages, customizable UI themes, and a few hidden arcade games.
 ![box-image](https://github.com/Kiteretsu1/PocketBeep-Morse-Transreciver/blob/main/Assets/IMG_20261117_125700.jpg?raw=true)
 
-![pdf](https://github.com/Kiteretsu1/PocketBeep-Morse-Transreciver/blob/main/Assets/MorseCircuit.pdf)
-
-![Alt text](Kiteretsu1/PocketBeep-Morse-Transreciver/Assets/GIF_20261117_185044_496.gif)
-![Alt text](Kiteretsu1/PocketBeep-Morse-Transreciver/Assets/MorseCircuit.pdf)
-
 ## Features
 * **True Pulse Transmission:** Calculates and transmits raw timing data (dots, dashes, gaps) over ESP-NOW, keeping units perfectly synchronized regardless of the sender's tapping speed.
 * **Live Translator:** A built-in 40-key digital keyboard allows users who don't know Morse code to type messages that are automatically pulsed over the air.
