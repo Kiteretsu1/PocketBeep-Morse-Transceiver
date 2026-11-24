@@ -6,25 +6,32 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
 
-#define PIN_BAT_ADC    D0
-#define PIN_SPEAKER    D1
-#define PIN_BTN_RED    D2
-#define PIN_BTN_LEFT   D3
-#define PIN_BTN_RIGHT  D4
+// =========================================================================
+// 1. HARDWARE PIN DEFINITIONS (XIAO ESP32-C3 & XIAO ESP32-S3)
+// =========================================================================
+#define PIN_BAT_ADC    D0   // Battery voltage divider input
+#define PIN_SPEAKER    D1   // Passive piezo buzzer via BC547
+#define PIN_BTN_RED    D2   // Red Action / Morse Key button
+#define PIN_BTN_LEFT   D3   // White Button A - Previous / Left
+#define PIN_BTN_RIGHT  D4   // White Button B - Next / Right
 
-#define TFT_CS         D6
-#define TFT_DC         D7
-#define TFT_SCK        D8
-#define TFT_MOSI       D10
-#define TFT_RST        -1
+#define TFT_CS         D6   // ST7735 CS
+#define TFT_DC         D7   // ST7735 A0 / DC
+#define TFT_SCK        D8   // ST7735 SCK
+#define TFT_MOSI       D10  // ST7735 SDA / MOSI
+#define TFT_RST        -1   // Tied to 3.3V
 
 #define SCREEN_W       160
 #define SCREEN_H       128
 
+// Hardware SPI Display + 40KB RAM Framebuffer Canvas for zero-flicker drawing
 Adafruit_ST7735 tft = Adafruit_ST7735(&SPI, TFT_CS, TFT_DC, TFT_RST);
 GFXcanvas16 canvas(SCREEN_W, SCREEN_H);
 Preferences prefs;
 
+// =========================================================================
+// 2. RGB565 COLOR THEMES (SELECTABLE IN SETTINGS)
+// =========================================================================
 struct Theme {
   const char* name;
   uint16_t bg;
@@ -38,13 +45,21 @@ struct Theme {
 };
 
 const Theme THEMES[5] = {
+  // 1. PHOSPHOR NES
   { "PHOSPHOR",   0x0881, 0x1103, 0x1A05, 0x37F1, 0x246A, 0xFE29, 0xFACA, 0xEFFF },
+  // 2. CUTESY BMO
   { "CUTESY BMO", 0x1083, 0x20E6, 0x398A, 0x6F9A, 0x44D1, 0xFC36, 0xFF0C, 0xFFDF },
+  // 3. GAMEBOY
   { "GAMEBOY",    0x0901, 0x19A3, 0x32C6, 0x9DE1, 0x53A3, 0xD78E, 0xFFFF, 0xF7F9 },
+  // 4. AMBER CRT
   { "AMBER CRT",  0x1060, 0x20C1, 0x4162, 0xFD80, 0x9B40, 0xFF10, 0xFABA, 0xFFDC },
+  // 5. FAMICOM
   { "FAMICOM",    0x1882, 0x28C3, 0x4985, 0xF68D, 0x9BD0, 0xFAC6, 0x5F1C, 0xFFDD }
 };
 
+// =========================================================================
+// 3. 12x12 BITMAP MENU ICONS
+// =========================================================================
 const uint16_t ICON_SEND_MORSE[12] = {
   0b000100100000, 0b001001001000, 0b000000000000, 0b000000011110,
   0b000000011110, 0b011111111100, 0b000110001000, 0b000110001000,
@@ -69,6 +84,9 @@ const uint16_t ICON_SETTINGS[12] = {
   0b000000000000, 0b001100000000, 0b111111111111, 0b001100000000
 };
 
+// =========================================================================
+// 4. MORSE CODE LOOKUP TABLE & 40-KEY TRANSLATE KEYBOARD
+// =========================================================================
 struct MorseMap {
   char ch;
   const char* code;
@@ -110,15 +128,27 @@ const char* encodeCharToMorse(char c) {
   return nullptr;
 }
 
+// =========================================================================
+// 5. ESP-NOW CARRIER PACKET (TIMING SYNC + SEQUENCE DEDUPLICATION)
+// =========================================================================
+// Zero ASCII text is ever sent! Only raw carrier state (1=ON, 0=OFF, 2=SYNC),
+// sequence ID for reliable double-send, and the 3 timing thresholds.
 typedef struct __attribute__((packed)) {
-  uint8_t  packetType;
+  uint8_t  packetType;   // 1 = CARRIER_ON, 0 = CARRIER_OFF, 2 = SETTINGS_SYNC
+  uint16_t seqNum;       // Sequence ID to ignore redundant duplicate packets
   uint16_t dotDashMs;
   uint16_t letterGapMs;
   uint16_t wordGapMs;
 } EspNowCwPacket;
 
-uint8_t broadcastAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+uint8_t  broadcastAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+uint16_t txSeqNum = 1;
+volatile uint16_t rxLastSeqNum  = 0;
+volatile uint8_t  rxLastPktType = 255;
 
+// =========================================================================
+// 6. APPLICATION STATE & SETTINGS
+// =========================================================================
 enum ScreenState {
   SCR_BOOT,
   SCR_HOME,
@@ -134,15 +164,17 @@ enum ScreenState {
 ScreenState currentScreen = SCR_BOOT;
 uint32_t bootStartMs = 0;
 
+// Settings (Persisted in NVS Flash)
 uint16_t cfgDotDashMs   = 200;
 uint16_t cfgLetterGapMs = 600;
 uint16_t cfgWordGapMs   = 1400;
-uint8_t  cfgVolumeIdx   = 2;
+uint8_t  cfgVolumeIdx   = 2; // 0:MUTE, 1:LOW, 2:MED, 3:HIGH
 uint8_t  cfgThemeIdx    = 0;
 
 const char* VOLUME_LABELS[4] = { "MUTE", "LOW", "MED", "HIGH" };
-const uint8_t VOLUME_DUTY[4] = { 0, 18, 65, 128 };
+const uint8_t VOLUME_DUTY[4] = { 0, 18, 65, 128 }; // 8-bit PWM duty for BC547 buzzer
 
+// Menu navigation indices
 int homeIdx = 0;
 int homeScroll = 0;
 int settingsIdx = 0;
@@ -152,9 +184,11 @@ uint32_t resetFlashUntil = 0;
 int gamesIdx = 0;
 int kbIdx = 0;
 
+// Battery monitoring
 int batteryPct = 100;
 uint32_t lastBatReadMs = 0;
 
+// Send Morse (Manual Keyer) State
 bool     sendKeyDown = false;
 uint32_t sendPressStartMs = 0;
 uint32_t sendLastReleaseMs = 0;
@@ -163,24 +197,33 @@ String   sendDecoded = "";
 bool     sendSpacePending = false;
 String   sendStatus = "HOLD RED TO KEY";
 
+// Translate (Non-blocking Auto-Keyer State Machine)
 String   transText = "HELLO ";
+bool     transIsPlaceholder = true; // Auto-clears on first user keypress
 bool     transActive = false;
 String   transPreview = "";
 struct TxEvent {
   bool     carrierOn;
   uint16_t durationMs;
-  String   preview;
+  char     preview[12];
 };
-TxEvent  txQueue[96];
+TxEvent  txQueue[256];
 int      txQueueLen = 0;
 int      txQueueIdx = 0;
 uint32_t txStepStartMs = 0;
 
-volatile bool     rxEdgePendingOn = false;
-volatile bool     rxEdgePendingOff = false;
-volatile uint16_t rxIncomingDotDash = 200;
-volatile uint16_t rxIncomingLetterGap = 600;
-volatile uint16_t rxIncomingWordGap = 1400;
+// Inbox / Receiver State (Timestamped FIFO Ring Buffer)
+struct RxEdgeEvent {
+  uint8_t  packetType;   // 1 = ON, 0 = OFF, 2 = SYNC
+  uint32_t timestampMs;
+  uint16_t dotDashMs;
+  uint16_t letterGapMs;
+  uint16_t wordGapMs;
+};
+const uint8_t RX_QUEUE_SIZE = 32;
+RxEdgeEvent      rxQueue[RX_QUEUE_SIZE];
+volatile uint8_t rxQueueHead = 0;
+volatile uint8_t rxQueueTail = 0;
 
 bool     rxCarrierOn = false;
 uint32_t rxPressStartMs = 0;
@@ -194,6 +237,7 @@ uint16_t rxSyncedDotDash = 200;
 uint16_t rxSyncedLetterGap = 600;
 uint16_t rxSyncedWordGap = 1400;
 
+// Mini-Games State
 struct DinoObstacle { float x; int w; int h; bool active; };
 DinoObstacle dinoObs[4];
 bool  dinoGameOver = false;
@@ -206,6 +250,9 @@ bool  flappyGameOver = false;
 float birdY = 56, birdVy = 0;
 int   flappyScore = 0, flappyHigh = 0, flappySpawnTick = 10;
 
+// =========================================================================
+// 7. PIEZO SPEAKER PWM DRIVER (ESP32 Core 2.x and 3.x Compatible)
+// =========================================================================
 uint32_t beepOffAtMs = 0;
 bool     cwToneActive = false;
 
@@ -251,6 +298,9 @@ void updateAudioTimer() {
   }
 }
 
+// =========================================================================
+// 8. NVS SETTINGS STORAGE & ESP-NOW BROADCAST
+// =========================================================================
 void loadSettings() {
   prefs.begin("morse_cfg", true);
   cfgDotDashMs   = prefs.getUShort("dotDash", 200);
@@ -279,11 +329,19 @@ void saveSettings() {
 }
 
 void sendEspNowPacket(uint8_t type) {
+  txSeqNum++;
+  if (txSeqNum == 0) txSeqNum = 1;
+
   EspNowCwPacket pkt;
   pkt.packetType  = type;
+  pkt.seqNum      = txSeqNum;
   pkt.dotDashMs   = cfgDotDashMs;
   pkt.letterGapMs = cfgLetterGapMs;
   pkt.wordGapMs   = cfgWordGapMs;
+
+  // Transmit twice (1.5ms apart) to prevent broadcast RF drops
+  esp_now_send(broadcastAddress, (uint8_t*)&pkt, sizeof(pkt));
+  delayMicroseconds(1500);
   esp_now_send(broadcastAddress, (uint8_t*)&pkt, sizeof(pkt));
 }
 
@@ -296,35 +354,50 @@ void onEspNowRecv(const uint8_t *mac, const uint8_t *data, int len) {
   EspNowCwPacket pkt;
   memcpy(&pkt, data, sizeof(pkt));
 
-  rxIncomingDotDash   = pkt.dotDashMs;
-  rxIncomingLetterGap = pkt.letterGapMs;
-  rxIncomingWordGap   = pkt.wordGapMs;
+  // Ignore redundant second copy of the same packet
+  if (pkt.seqNum == rxLastSeqNum && pkt.packetType == rxLastPktType) return;
+  rxLastSeqNum  = pkt.seqNum;
+  rxLastPktType = pkt.packetType;
 
-  if (pkt.packetType == 1) {
-    rxEdgePendingOn = true;
-  } else if (pkt.packetType == 0) {
-    rxEdgePendingOff = true;
+  uint8_t head = rxQueueHead;
+  uint8_t nextHead = (head + 1) % RX_QUEUE_SIZE;
+  if (nextHead != rxQueueTail) {
+    rxQueue[head].packetType  = pkt.packetType;
+    rxQueue[head].timestampMs = millis(); // Exact arrival time
+    rxQueue[head].dotDashMs   = pkt.dotDashMs;
+    rxQueue[head].letterGapMs = pkt.letterGapMs;
+    rxQueue[head].wordGapMs   = pkt.wordGapMs;
+    rxQueueHead = nextHead;
   }
 }
 
+// =========================================================================
+// 9. BATTERY ADC READER (PIN D0 - SIGNED MATH FIX)
+// =========================================================================
 void updateBatteryPercentage() {
   if (millis() - lastBatReadMs < 2500 && lastBatReadMs != 0) return;
   lastBatReadMs = millis();
 
+  // Average 8 samples from D0 voltage divider (2x 10k resistors -> multiply by 2)
   uint32_t mvSum = 0;
   for (int i = 0; i < 8; i++) {
     mvSum += analogReadMilliVolts(PIN_BAT_ADC);
   }
-  uint32_t batMv = (mvSum / 8) * 2;
+  int32_t batMv = (int32_t)((mvSum / 8) * 2);
 
-  if (batMv < 2500) {
+  if (batMv < 1500) {
+    // USB-only with no battery attached
     batteryPct = 100;
   } else {
-    int pct = (int)((batMv - 3300) * 100L / (4200 - 3300));
-    batteryPct = constrain(pct, 5, 100);
+    // Signed subtraction prevents underflow jumping to 100% when battery sags < 3.3V
+    int32_t pct = ((batMv - 3300) * 100L) / (4200 - 3300);
+    batteryPct = (int)constrain(pct, (int32_t)0, (int32_t)100);
   }
 }
 
+// =========================================================================
+// 10. TRANSLATE AUTO-TRANSMITTER QUEUE (NON-BLOCKING)
+// =========================================================================
 void stopTranslateTx() {
   if (transActive) {
     sendEspNowPacket(0);
@@ -344,36 +417,71 @@ void startTranslateTx() {
   stopTranslateTx();
   txQueueLen = 0;
 
+  // Send timing sync first so RX thresholds match before pulse 1
+  sendEspNowPacket(2);
+
   uint16_t u        = max(40, (int)(cfgDotDashMs / 2));
   uint16_t dashMs   = (uint16_t)(cfgDotDashMs * 1.5);
   uint16_t intraGap = u;
 
-  for (unsigned int i = 0; i < msg.length() && txQueueLen < 90; i++) {
+  // Add safe margin above letterGapMs, staying well below wordGapMs
+  uint16_t gapSpan     = (cfgWordGapMs > cfgLetterGapMs) ? (cfgWordGapMs - cfgLetterGapMs) : 300;
+  uint16_t letterGapTx = cfgLetterGapMs + min((uint16_t)150, (uint16_t)(gapSpan / 3));
+  uint16_t wordGapTx   = cfgWordGapMs + 200;
+
+  for (unsigned int i = 0; i < msg.length() && txQueueLen < 245; i++) {
     char ch = msg[i];
     if (ch == ' ') {
-      txQueue[txQueueLen++] = { false, cfgWordGapMs, "[SPACE]" };
+      // Upgrade the previous letter's trailing gap into a clean word gap
+      if (txQueueLen > 0 && !txQueue[txQueueLen - 1].carrierOn) {
+        txQueue[txQueueLen - 1].durationMs = wordGapTx;
+        strncpy(txQueue[txQueueLen - 1].preview, "[SPACE]", 11);
+        txQueue[txQueueLen - 1].preview[11] = '\0';
+      } else {
+        txQueue[txQueueLen].carrierOn  = false;
+        txQueue[txQueueLen].durationMs = wordGapTx;
+        strncpy(txQueue[txQueueLen].preview, "[SPACE]", 11);
+        txQueue[txQueueLen].preview[11] = '\0';
+        txQueueLen++;
+      }
       continue;
     }
+
     const char* code = encodeCharToMorse(ch);
     if (!code) continue;
 
-    String label = String(ch) + " [" + String(code) + "]";
+    char label[12];
+    snprintf(label, sizeof(label), "%c [%s]", ch, code);
+
     int cLen = strlen(code);
-    for (int s = 0; s < cLen && txQueueLen < 92; s++) {
-      uint16_t toneDur = (code[s] == '.') ? u : dashMs;
-      txQueue[txQueueLen++] = { true,  toneDur, label };
+    for (int s = 0; s < cLen && txQueueLen < 252; s++) {
+      txQueue[txQueueLen].carrierOn  = true;
+      txQueue[txQueueLen].durationMs = (code[s] == '.') ? u : dashMs;
+      strncpy(txQueue[txQueueLen].preview, label, 11);
+      txQueue[txQueueLen].preview[11] = '\0';
+      txQueueLen++;
+
       if (s < cLen - 1) {
-        txQueue[txQueueLen++] = { false, intraGap, label };
+        txQueue[txQueueLen].carrierOn  = false;
+        txQueue[txQueueLen].durationMs = intraGap;
+        strncpy(txQueue[txQueueLen].preview, label, 11);
+        txQueue[txQueueLen].preview[11] = '\0';
+        txQueueLen++;
       }
     }
-    txQueue[txQueueLen++] = { false, cfgLetterGapMs, label };
+
+    txQueue[txQueueLen].carrierOn  = false;
+    txQueue[txQueueLen].durationMs = letterGapTx;
+    strncpy(txQueue[txQueueLen].preview, label, 11);
+    txQueue[txQueueLen].preview[11] = '\0';
+    txQueueLen++;
   }
 
   if (txQueueLen > 0) {
-    transActive = true;
-    txQueueIdx = 0;
+    transActive   = true;
+    txQueueIdx    = 0;
     txStepStartMs = millis();
-    transPreview = txQueue[0].preview;
+    transPreview  = String(txQueue[0].preview);
     if (txQueue[0].carrierOn) {
       startCwTone(780);
       sendEspNowPacket(1);
@@ -394,14 +502,14 @@ void updateTranslateTx() {
         stopCwTone();
         sendEspNowPacket(0);
       }
-      transActive = false;
+      transActive  = false;
       transPreview = "";
       return;
     }
 
     txStepStartMs = now;
-    transPreview = txQueue[txQueueIdx].preview;
-    bool nowOn = txQueue[txQueueIdx].carrierOn;
+    transPreview  = String(txQueue[txQueueIdx].preview);
+    bool nowOn    = txQueue[txQueueIdx].carrierOn;
 
     if (nowOn && !wasOn) {
       startCwTone(780);
@@ -413,6 +521,9 @@ void updateTranslateTx() {
   }
 }
 
+// =========================================================================
+// 11. MINI-GAMES ENGINE (DINO & FLAPPY BIRD)
+// =========================================================================
 void initDinoGame() {
   dinoGameOver = false;
   dinoY = 0;
@@ -523,6 +634,9 @@ void updateFlappyGame() {
   }
 }
 
+// =========================================================================
+// 12. NAVIGATION, DEBOUNCE, CHORDING & TRANSLATE HOLD-TO-SCROLL
+// =========================================================================
 int wrapIdx(int cur, int delta, int total) {
   return (cur + delta + total) % total;
 }
@@ -645,7 +759,7 @@ void handleNavRight() {
 void handleBothWhiteChord() {
   stopCwTone();
   stopTranslateTx();
-  if ( settingsLocked ) {
+  if (settingsLocked) {
     settingsLocked = false;
     saveSettings();
   }
@@ -712,10 +826,29 @@ void handleRedPress() {
 
     case SCR_SEND:
       if (!sendKeyDown) {
+        uint32_t now = millis();
+        // Flush any completed letter or word space before starting the new pulse
+        if (sendLastReleaseMs > 0) {
+          uint32_t gapMs = now - sendLastReleaseMs;
+          if (sendSymbols.length() > 0 && gapMs >= cfgLetterGapMs) {
+            char c = decodeMorseSymbol(sendSymbols);
+            sendDecoded += c;
+            if (sendDecoded.length() > 22) sendDecoded.remove(0, sendDecoded.length() - 22);
+            sendSymbols = "";
+            sendSpacePending = true;
+          }
+          if (sendSpacePending && gapMs >= cfgWordGapMs) {
+            if (sendDecoded.length() > 0 && !sendDecoded.endsWith(" ")) {
+              sendDecoded += " ";
+              if (sendDecoded.length() > 22) sendDecoded.remove(0, sendDecoded.length() - 22);
+            }
+            sendSpacePending = false;
+          }
+        }
         sendKeyDown = true;
-        sendPressStartMs = millis();
+        sendPressStartMs = now;
         startCwTone(760);
-        sendEspNowPacket(1);
+        sendEspNowPacket(1); // Broadcast CARRIER_ON
       }
       break;
 
@@ -732,13 +865,27 @@ void handleRedPress() {
       }
       const char* key = KEYBOARD_KEYS[kbIdx];
       playUiBeep(1120, 30);
-      if (strcmp(key, "DEL") == 0) {
-        if (transText.length() > 0) transText.remove(transText.length() - 1);
-      } else if (strcmp(key, "SPC") == 0) {
-        if (transText.length() < 18) transText += " ";
-      } else if (strcmp(key, "SND") == 0) {
+
+      if (strcmp(key, "SND") == 0) {
         startTranslateTx();
+      } else if (strcmp(key, "DEL") == 0) {
+        if (transIsPlaceholder) {
+          transText = "";
+          transIsPlaceholder = false;
+        } else if (transText.length() > 0) {
+          transText.remove(transText.length() - 1);
+        }
+      } else if (strcmp(key, "SPC") == 0) {
+        if (transIsPlaceholder) {
+          transText = "";
+          transIsPlaceholder = false;
+        }
+        if (transText.length() < 18) transText += " ";
       } else {
+        if (transIsPlaceholder) {
+          transText = "";
+          transIsPlaceholder = false;
+        }
         if (transText.length() < 18) transText += key;
       }
       break;
@@ -780,7 +927,7 @@ void handleRedRelease() {
     uint32_t dur = now - sendPressStartMs;
     sendKeyDown = false;
     stopCwTone();
-    sendEspNowPacket(0);
+    sendEspNowPacket(0); // Broadcast CARRIER_OFF
 
     char sym = (dur < cfgDotDashMs) ? '.' : '-';
     if (sendSymbols.length() < 6) sendSymbols += sym;
@@ -789,29 +936,89 @@ void handleRedRelease() {
   }
 }
 
-bool btnLeftWasDown = false;
-bool btnRightWasDown = false;
-bool btnRedWasDown = false;
-bool chordLatched = false;
+// 20ms Software Debouncer + Simultaneous L+R Chord + Translate Hold-to-Scroll
+struct DebouncedBtn {
+  uint8_t  pin;
+  bool     stable;
+  bool     lastRaw;
+  uint32_t lastChangeMs;
+
+  bool read(uint32_t now) {
+    bool raw = (digitalRead(pin) == HIGH);
+    if (raw != lastRaw) {
+      lastRaw = raw;
+      lastChangeMs = now;
+    }
+    if ((now - lastChangeMs) >= 20) {
+      stable = raw;
+    }
+    return stable;
+  }
+};
+
+DebouncedBtn dbLeft  = { PIN_BTN_LEFT,  false, false, 0 };
+DebouncedBtn dbRight = { PIN_BTN_RIGHT, false, false, 0 };
+DebouncedBtn dbRed   = { PIN_BTN_RED,   false, false, 0 };
+
+bool     btnLeftWasDown  = false;
+bool     btnRightWasDown = false;
+bool     btnRedWasDown   = false;
+bool     chordLatched    = false;
+bool     scrollConsumed  = false;
+uint32_t leftPressMs     = 0;
+uint32_t rightPressMs    = 0;
+uint32_t lastScrollStep  = 0;
 
 void pollButtons() {
-  bool leftNow  = (digitalRead(PIN_BTN_LEFT)  == HIGH);
-  bool rightNow = (digitalRead(PIN_BTN_RIGHT) == HIGH);
-  bool redNow   = (digitalRead(PIN_BTN_RED)   == HIGH);
+  uint32_t now  = millis();
+  bool leftNow  = dbLeft.read(now);
+  bool rightNow = dbRight.read(now);
+  bool redNow   = dbRed.read(now);
 
+  // Track press start times for Translate hold-to-scroll
+  if (leftNow  && !btnLeftWasDown)  leftPressMs  = now;
+  if (rightNow && !btnRightWasDown) rightPressMs = now;
+
+  // Detect simultaneous Left + Right chord
   if (leftNow && rightNow && !chordLatched) {
     chordLatched = true;
+    scrollConsumed = false;
     handleBothWhiteChord();
   }
 
-  if (!leftNow && btnLeftWasDown) {
-    if (!chordLatched) handleNavLeft();
-    if (!rightNow) chordLatched = false;
+  // Translate-only Hold-to-Scroll ("Woosh" navigation after 260ms hold)
+  if (currentScreen == SCR_TRANSLATE && !transActive && !chordLatched) {
+    if (leftNow && !rightNow && (now - leftPressMs >= 260)) {
+      if (now - lastScrollStep >= 85) {
+        lastScrollStep = now;
+        scrollConsumed = true;
+        kbIdx = wrapIdx(kbIdx, -1, 40);
+      }
+    } else if (rightNow && !leftNow && (now - rightPressMs >= 260)) {
+      if (now - lastScrollStep >= 85) {
+        lastScrollStep = now;
+        scrollConsumed = true;
+        kbIdx = wrapIdx(kbIdx, +1, 40);
+      }
+    }
   }
 
+  // Left button release (fires single step only if neither chord nor scroll triggered)
+  if (!leftNow && btnLeftWasDown) {
+    if (!chordLatched && !scrollConsumed) handleNavLeft();
+    if (!rightNow) {
+      chordLatched = false;
+      scrollConsumed = false;
+    }
+  }
+
+  // Right button release (fires single step only if neither chord nor scroll triggered)
   if (!rightNow && btnRightWasDown) {
-    if (!chordLatched) handleNavRight();
-    if (!leftNow) chordLatched = false;
+    if (!chordLatched && !scrollConsumed) handleNavRight();
+    if (!leftNow) {
+      chordLatched = false;
+      scrollConsumed = false;
+    }
   }
 
   if (redNow && !btnRedWasDown) handleRedPress();
@@ -822,41 +1029,72 @@ void pollButtons() {
   btnRedWasDown   = redNow;
 }
 
+// =========================================================================
+// 13. REAL-TIME MORSE PULSE & SILENCE DECODER (TX & RX)
+// =========================================================================
 void updateMorseDecoders() {
   uint32_t now = millis();
 
-  if (rxEdgePendingOn) {
-    rxEdgePendingOn = false;
-    rxSyncedDotDash   = rxIncomingDotDash;
-    rxSyncedLetterGap = rxIncomingLetterGap;
-    rxSyncedWordGap   = rxIncomingWordGap;
-    if (!rxCarrierOn) {
-      rxCarrierOn = true;
-      rxPressStartMs = now;
-      startCwTone(860);
+  // Drain incoming ESP-NOW events in exact arrival order with exact timestamps
+  while (rxQueueTail != rxQueueHead) {
+    uint8_t tail = rxQueueTail;
+    RxEdgeEvent ev = rxQueue[tail];
+    rxQueueTail = (tail + 1) % RX_QUEUE_SIZE;
+
+    rxSyncedDotDash   = ev.dotDashMs;
+    rxSyncedLetterGap = ev.letterGapMs;
+    rxSyncedWordGap   = ev.wordGapMs;
+
+    if (ev.packetType == 1) { // CARRIER_ON
+      // Measure silence gap BEFORE starting the new pulse
+      if (!rxCarrierOn && rxLastReleaseMs > 0 && ev.timestampMs >= rxLastReleaseMs) {
+        uint32_t gapMs = ev.timestampMs - rxLastReleaseMs;
+        if (rxSymbols.length() > 0 && gapMs >= rxSyncedLetterGap) {
+          char c = decodeMorseSymbol(rxSymbols);
+          rxDecoded += c;
+          if (rxDecoded.length() > 22) rxDecoded.remove(0, rxDecoded.length() - 22);
+          rxSymbols = "";
+          rxSpacePending = true;
+          rxStatus = "DECODED: " + String(c);
+          if (currentScreen != SCR_RECEIVE) rxHasUnread = true;
+        }
+        if (rxSpacePending && gapMs >= rxSyncedWordGap) {
+          if (rxDecoded.length() > 0 && !rxDecoded.endsWith(" ")) {
+            rxDecoded += " ";
+            if (rxDecoded.length() > 22) rxDecoded.remove(0, rxDecoded.length() - 22);
+            rxStatus = "WORD SPACE";
+          }
+          rxSpacePending = false;
+        }
+      }
+
+      if (!rxCarrierOn) {
+        rxCarrierOn    = true;
+        rxPressStartMs = ev.timestampMs;
+        startCwTone(860);
+      }
+    } else if (ev.packetType == 0) { // CARRIER_OFF
+      if (rxCarrierOn) {
+        uint32_t pulseMs = (ev.timestampMs >= rxPressStartMs) ? (ev.timestampMs - rxPressStartMs) : 0;
+        rxCarrierOn = false;
+        stopCwTone();
+
+        char sym = (pulseMs < rxSyncedDotDash) ? '.' : '-';
+        if (rxSymbols.length() < 6) rxSymbols += sym;
+        rxLastReleaseMs = ev.timestampMs;
+        rxStatus = (sym == '.' ? "RX DOT " : "RX DASH ") + String(pulseMs) + "MS";
+      }
     }
   }
 
-  if (rxEdgePendingOff) {
-    rxEdgePendingOff = false;
-    if (rxCarrierOn) {
-      uint32_t pulseMs = now - rxPressStartMs;
-      rxCarrierOn = false;
-      stopCwTone();
-
-      char sym = (pulseMs < rxSyncedDotDash) ? '.' : '-';
-      if (rxSymbols.length() < 6) rxSymbols += sym;
-      rxLastReleaseMs = now;
-      rxStatus = (sym == '.' ? "RX DOT " : "RX DASH ") + String(pulseMs) + "MS";
-    }
-  }
-
+  // Safety Watchdog: If a CARRIER_OFF packet is dropped over RF, silence buzzer after 3s
   if (rxCarrierOn && (now - rxPressStartMs > 3000)) {
     rxCarrierOn = false;
     stopCwTone();
     rxLastReleaseMs = now;
   }
 
+  // A. Local Manual Keying Silence Decoder (for trailing letter / word space)
   if (!sendKeyDown && sendLastReleaseMs > 0) {
     uint32_t idleMs = now - sendLastReleaseMs;
     if (sendSymbols.length() > 0 && idleMs >= cfgLetterGapMs) {
@@ -878,6 +1116,7 @@ void updateMorseDecoders() {
     }
   }
 
+  // B. Incoming ESP-NOW Carrier Silence Decoder (for trailing letter / word space)
   if (!rxCarrierOn && rxLastReleaseMs > 0) {
     uint32_t rxIdleMs = now - rxLastReleaseMs;
     if (rxSymbols.length() > 0 && rxIdleMs >= rxSyncedLetterGap) {
@@ -900,6 +1139,9 @@ void updateMorseDecoders() {
   }
 }
 
+// =========================================================================
+// 14. CANVAS DRAWING HELPERS & SCREEN RENDERERS
+// =========================================================================
 int textWidth(const String& s, uint8_t size = 1) {
   return s.length() > 0 ? (int)s.length() * (6 * size) - size : 0;
 }
@@ -984,7 +1226,7 @@ void drawTopBar(const String& title, const String& extraTag = "") {
   canvas.fillRect(145, 3, 11, 7, batColor);
   canvas.fillRect(156, 5, 2, 3, batColor);
   canvas.fillRect(146, 4, 9, 5, P.panel);
-  if (bars >= 1) canvas.fillRect(147, 5, 2, 3, batColor);
+  if (bars >= 1 && batteryPct > 0) canvas.fillRect(147, 5, 2, 3, batColor);
   if (bars >= 2) canvas.fillRect(150, 5, 2, 3, batColor);
   if (bars >= 3) canvas.fillRect(153, 5, 2, 3, batColor);
 }
@@ -1140,7 +1382,8 @@ void renderTranslateScreen() {
     drawText("TX: " + transPreview, 8, 21, P.hi, 1);
   } else {
     String cur = ((millis() / 400) % 2 == 0) ? "_" : "";
-    drawText(transText + cur, 8, 21, P.white, 1);
+    uint16_t textCol = transIsPlaceholder ? P.dim : P.white;
+    drawText(transText + cur, 8, 21, textCol, 1);
   }
 
   const int startX = 4, startY = 38, cellW = 19, cellH = 15;
@@ -1172,7 +1415,7 @@ void renderTranslateScreen() {
     drawText(kLabel, tx, y + 4, tCol, 1);
   }
 
-  drawBottomBar("L/R", "KEY", "RED", transActive ? "STOP" : "SELECT");
+  drawBottomBar("L/R", "HOLD", "RED", transActive ? "STOP" : "SELECT");
 }
 
 void renderReceiveScreen() {
@@ -1344,14 +1587,18 @@ void renderFlappyScreen() {
   drawBottomBar("L+R", "EXIT", "RED", "FLAP");
 }
 
+// =========================================================================
+// 15. SETUP & MAIN LOOP
+// =========================================================================
 void setup() {
   Serial.begin(115200);
 
-  pinMode(PIN_BTN_LEFT,  INPUT_PULLUP);
-  pinMode(PIN_BTN_RIGHT, INPUT_PULLUP);
-  pinMode(PIN_BTN_RED,   INPUT_PULLUP);
+  pinMode(PIN_BTN_LEFT,  INPUT);
+  pinMode(PIN_BTN_RIGHT, INPUT);
+  pinMode(PIN_BTN_RED,   INPUT);
   pinMode(PIN_BAT_ADC,   INPUT);
 
+  // Configure Hardware PWM for Passive Piezo Speaker on D1
   #if ESP_ARDUINO_VERSION_MAJOR >= 3
     ledcAttach(PIN_SPEAKER, 1000, 8);
   #else
@@ -1362,11 +1609,13 @@ void setup() {
   loadSettings();
   updateBatteryPercentage();
 
+  // Initialize ST7735 160x128 Landscape Display
   SPI.begin(TFT_SCK, -1, TFT_MOSI, TFT_CS);
   tft.initR(INITR_BLACKTAB);
-  tft.setRotation(3);
+  tft.setRotation(3); // Landscape 160x128
   canvas.setTextWrap(false);
 
+  // Initialize Wi-Fi Station & ESP-NOW Broadcast Peer
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
   if (esp_now_init() == ESP_OK) {
@@ -1391,6 +1640,7 @@ void loop() {
   updateAudioTimer();
   updateBatteryPercentage();
 
+  // Clear off-screen framebuffer & render active screen
   canvas.fillScreen(THEMES[cfgThemeIdx].bg);
 
   switch (currentScreen) {
@@ -1405,10 +1655,15 @@ void loop() {
     case SCR_FLAPPY:    renderFlappyScreen();    break;
   }
 
+  // Push complete 160x128 frame to ST7735 over SPI (Zero flicker!)
   tft.drawRGBBitmap(0, 0, canvas.getBuffer(), SCREEN_W, SCREEN_H);
 
-  uint32_t frameTime = millis() - frameStart;
-  if (frameTime < 22) {
-    delay(22 - frameTime);
+  // Keep ~45 FPS display pacing while polling buttons & TX/RX timing every 1ms
+  while (millis() - frameStart < 22) {
+    pollButtons();
+    updateTranslateTx();
+    updateMorseDecoders();
+    updateAudioTimer();
+    delay(1);
   }
 }
