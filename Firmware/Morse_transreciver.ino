@@ -372,7 +372,7 @@ void onEspNowRecv(const uint8_t *mac, const uint8_t *data, int len) {
 }
 
 // =========================================================================
-// 9. BATTERY ADC READER (PIN D0 - SIGNED MATH FIX)
+// 9. BATTERY ADC READER (PIN D0)
 // =========================================================================
 void updateBatteryPercentage() {
   if (millis() - lastBatReadMs < 2500 && lastBatReadMs != 0) return;
@@ -986,7 +986,7 @@ void pollButtons() {
     handleBothWhiteChord();
   }
 
-  // Translate-only Hold-to-Scroll ("Woosh" navigation after 260ms hold)
+  // Translate-only Hold-to-Scroll (fast scroll after 260ms hold)
   if (currentScreen == SCR_TRANSLATE && !transActive && !chordLatched) {
     if (leftNow && !rightNow && (now - leftPressMs >= 260)) {
       if (now - lastScrollStep >= 85) {
